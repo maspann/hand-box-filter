@@ -4,6 +4,8 @@ import mediapipe as mp
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
+INDEX_TIP = 8  # nomor landmark ujung jari telunjuk di MediaPipe
+
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
@@ -12,15 +14,22 @@ with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
         if not ok:
             break
 
-        frame = cv2.flip(frame, 1)  # mirror, biar gerak tangan terasa natural
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # MediaPipe maunya RGB
+        frame = cv2.flip(frame, 1)
+        h, w, _ = frame.shape  # ukuran frame, buat konversi koordinat
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
+        fingertips = []  # koordinat ujung telunjuk tiap tangan
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 mp_draw.draw_landmarks(
                     frame, hand_landmarks, mp_hands.HAND_CONNECTIONS
                 )
+                tip = hand_landmarks.landmark[INDEX_TIP]
+                # landmark MediaPipe itu 0-1, dikali ukuran frame jadi pixel
+                px, py = int(tip.x * w), int(tip.y * h)
+                fingertips.append((px, py))
+                cv2.circle(frame, (px, py), 10, (0, 255, 0), -1)  # tandai
 
         cv2.imshow("Hand Box Filter", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
