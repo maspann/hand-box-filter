@@ -30,7 +30,14 @@ with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
                 px, py = int(tip.x * w), int(tip.y * h)
                 fingertips.append((px, py))
                 cv2.circle(frame, (px, py), 10, (0, 255, 0), -1)  # tandai
-
+        
+        # kalau dua tangan kedeteksi, gambar kotak antar dua ujung telunjuk
+        if len(fingertips) == 2:
+            (x1, y1), (x2, y2) = fingertips
+            top_left = (min(x1, x2), min(y1, y2))
+            bottom_right = (max(x1, x2), max(y1, y2))
+            cv2.rectangle(frame, top_left, bottom_right, (0, 255, 0), 2)
+            
         cv2.imshow("Hand Box Filter", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
