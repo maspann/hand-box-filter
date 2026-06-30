@@ -13,6 +13,8 @@ with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
         if not ok:
             break
 
+        frame = cv2.cvtColor(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)  # BUG: bikin SEMUA abu-abu
+        
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
