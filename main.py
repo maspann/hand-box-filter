@@ -3,7 +3,7 @@ import mediapipe as mp
 
 mp_hands = mp.solutions.hands
 
-INDEX_TIP = 8  # landmark ujung telunjuk
+THUMB_TIP, INDEX_TIP = 4, 8 
 
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
@@ -19,17 +19,20 @@ with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
         results = hands.process(rgb)
 
         fingertips = []
+        corners = []  # 4 sudut: jempol+telunjuk tiap tangan
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                tip = hand_landmarks.landmark[INDEX_TIP]
-                px, py = int(tip.x * w), int(tip.y * h)
-                fingertips.append((px, py))
+                lm = hand_landmarks.landmark
+                for tip_id in (THUMB_TIP, INDEX_TIP):
+                    corners.append((int(lm[tip_id].x * w), int(lm[tip_id].y * h)))
 
-        # box gesture: butuh dua tangan
-        if len(fingertips) == 2:
-            (x1, y1), (x2, y2) = fingertips
-            x_min, x_max = min(x1, x2), max(x1, x2)
-            y_min, y_max = min(y1, y2), max(y1, y2)
+        # butuh dua tangan = 4 titik
+        if len(corners) == 4:
+            xs = [p[0] for p in corners]
+            ys = [p[1] for p in corners]
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+            # (logika grayscale + rectangle yang lama tetap di sini dulu)
 
             # ROI = area di dalam kotak. Ingat urutan numpy: baris (y) dulu, kolom (x)
             roi = frame[y_min:y_max, x_min:x_max]
