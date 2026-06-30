@@ -5,24 +5,13 @@ import mediapipe as mp
 mp_hands = mp.solutions.hands
 
 WRIST = 0
-THUMB_TIP, INDEX_TIP = 4, 8
-
-# tiap jari: (ujung, sendi tengah) -> buat cek "jelas terbuka"
-FINGER_JOINTS = {
-    "thumb":  (4, 2),
-    "index":  (8, 6),
-    "middle": (12, 10),
-    "ring":   (16, 14),
-    "pinky":  (20, 18),
-}
-EXTEND_MARGIN = 1.15  # ujung harus 15% lebih jauh dari pergelangan dibanding sendi
+TIP_IDS = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+PIP_IDS = {"thumb": 2, "index": 6, "middle": 10, "ring": 14, "pinky": 18}
+EXTEND_MARGIN = 1.15  # ujung harus cukup jauh dari pergelangan dibanding sendi
 
 
 # ---------- FILTER: terima ROI (BGR), balikin ROI ukuran sama ----------
-def filter_invert(roi):
-    return cv2.bitwise_not(roi)
-
-def filter_pixelate(roi, blocks=16):
+def filter_pixelate(roi, blocks=14):
     h, w = roi.shape[:2]
     small = cv2.resize(roi, (max(1, w // blocks), max(1, h // blocks)),
                        interpolation=cv2.INTER_LINEAR)
@@ -42,35 +31,41 @@ def filter_edges(roi):
 def filter_blur(roi):
     return cv2.GaussianBlur(roi, (21, 21), 0)
 
-# REGISTRY: jari -> (label, filter). Urutan list = urutan numpuknya.
-FILTER_PIPELINE = [
-    ("index",  "PIXELATE", filter_pixelate),
-    ("middle", "THERMAL",  filter_thermal),
-    ("ring",   "EDGES",    filter_edges),
-    ("pinky",  "BLUR",     filter_blur),
-    ("thumb",  "INVERT",   filter_invert),
-]
+def filter_invert(roi):
+    return cv2.bitwise_not(roi)
+
+# tiap jari -> (label, warna garis, filter). Tiap jari = kotak & filter sendiri.
+FINGER_FILTERS = {
+    "thumb":  ("INVERT",   (200, 200, 200), filter_invert),
+    "index":  ("PIXELATE", (0, 255, 0),     filter_pixelate),
+    "middle": ("THERMAL",  (0, 165, 255),   filter_thermal),
+    "ring":   ("EDGES",    (255, 0, 255),   filter_edges),
+    "pinky":  ("BLUR",     (255, 255, 0),   filter_blur),
+}
 
 
 # ---------- helper ----------
 def dist(a, b):
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
 
-def finger_states(hand_landmarks):
-    """Jari mana yang JELAS terbuka. Ngepal -> semua False -> nggak kedeteksi."""
+def extended_fingers(hand_landmarks):
+    """Nama jari yang JELAS terbuka. Ngepal/jari nekuk -> nggak masuk -> nggak kedeteksi."""
     lm = hand_landmarks.landmark
     wrist = lm[WRIST]
-    return {
-        name: dist(lm[tip], wrist) > dist(lm[pip], wrist) * EXTEND_MARGIN
-        for name, (tip, pip) in FINGER_JOINTS.items()
-    }
+    out = set()
+    for name in TIP_IDS:
+        if dist(lm[TIP_IDS[name]], wrist) > dist(lm[PIP_IDS[name]], wrist) * EXTEND_MARGIN:
+            out.add(name)
+    return out
 
-def order_quad(points):
-    """Urutkan 4 titik mengelilingi pusatnya -> poligon nggak nyilang (free-roam)."""
-    pts = np.array(points, dtype=np.float32)
-    c = pts.mean(axis=0)
-    ang = np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0])
-    return pts[np.argsort(ang)].astype(np.int32)
+def square_from_diagonal(p1, p2):
+    """2 ujung jari = diagonal -> kotak MIRING (free-roam). Balikin 4 sudut."""
+    p1, p2 = np.array(p1, np.float32), np.array(p2, np.float32)
+    center = (p1 + p2) / 2
+    half = (p2 - p1) / 2
+    perp = np.array([-half[1], half[0]])      # tegak lurus, panjang sama -> bikin miring
+    return np.array([center + half, center + perp,
+                     center - half, center - perp], dtype=np.int32)
 
 
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -88,40 +83,37 @@ with mp_hands.Hands(max_num_hands=2,
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
-        corners = []      # sudut = ujung jempol+telunjuk, CUMA yang jelas terbuka
-        active = set()    # semua jari terbuka dari kedua tangan
+        # kumpulin ujung jari yang terbuka, dikelompokin PER NAMA JARI (lintas tangan)
+        tips = {name: [] for name in FINGER_FILTERS}
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                states = finger_states(hand_landmarks)
-                active |= {name for name, up in states.items() if up}
                 lm = hand_landmarks.landmark
-                if states["thumb"]:
-                    corners.append((int(lm[THUMB_TIP].x * w), int(lm[THUMB_TIP].y * h)))
-                if states["index"]:
-                    corners.append((int(lm[INDEX_TIP].x * w), int(lm[INDEX_TIP].y * h)))
+                for name in extended_fingers(hand_landmarks):
+                    t = lm[TIP_IDS[name]]
+                    tips[name].append((int(t.x * w), int(t.y * h)))
 
-        # GATING: cuma jalan kalau dapet tepat 4 sudut jelas (2 tangan, jempol+telunjuk kebuka)
-        if len(corners) == 4:
-            quad = order_quad(corners)
+        clean = frame.copy()  # sumber bersih: tiap kotak baca kamera asli, bukan hasil kotak lain
+
+        # tiap jari yang terbuka di KEDUA tangan -> kotaknya sendiri + filternya sendiri
+        for name, (label, color, fn) in FINGER_FILTERS.items():
+            if len(tips[name]) != 2:      # butuh jari sama di kiri & kanan
+                continue
+            quad = square_from_diagonal(tips[name][0], tips[name][1])
             x, y, bw, bh = cv2.boundingRect(quad)
-            roi = frame[y:y + bh, x:x + bw]   # view ke frame asli
-            if roi.size > 0:
-                out = roi.copy()
-                labels = []
-                for finger, label, fn in FILTER_PIPELINE:
-                    if finger in active:          # condition jari terpenuhi?
-                        out = fn(out)             # numpuk: output jadi input filter berikutnya
-                        labels.append(label)
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(w, x + bw), min(h, y + bh)
+            if x2 <= x1 or y2 <= y1:
+                continue
 
-                # mask poligon (free-roam) dalam koordinat ROI
-                mask = np.zeros((bh, bw), dtype=np.uint8)
-                cv2.fillPoly(mask, [(quad - [x, y]).astype(np.int32)], 255)
-                roi[mask > 0] = out[mask > 0]     # tempel filter CUMA di dalam poligon
+            roi = clean[y1:y2, x1:x2]
+            filtered = fn(roi)
+            mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+            cv2.fillPoly(mask, [quad - [x1, y1]], 255)        # poligon miring (free-roam)
+            frame[y1:y2, x1:x2][mask > 0] = filtered[mask > 0]  # tempel cuma di dalam poligon
 
-                cv2.polylines(frame, [quad], True, (0, 255, 0), 2)
-                hud = " + ".join(labels) if labels else "no filter"
-                cv2.putText(frame, hud, (x, max(20, y - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.polylines(frame, [quad], True, color, 2)
+            cv2.putText(frame, label, (x1, max(20, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         cv2.imshow("Hand Box Filter", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
